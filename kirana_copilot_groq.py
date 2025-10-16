@@ -1,27 +1,41 @@
-from flask import Flask, request, jsonify, render_template_string, session
-from groq import Groq
 import os
+from flask import Flask, request, jsonify, render_template_string, session
+from dotenv import load_dotenv
+
+# LangChain & Groq
+from langchain_groq import ChatGroq
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
+from langchain.prompts import PromptTemplate
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = "super_secret_key"
 
-# Sample inventory with price
+# 🏪 Sample inventory
 INVENTORY = [
-    {"name": "Rice", "price": 60},       # per kg
-    {"name": "Milk", "price": 50},       # per litre
-    {"name": "Biscuits", "price": 40},   # per packet
-    {"name": "Sugar", "price": 50},      # per 500g
+    {"name": "Rice", "price": 60},
+    {"name": "Milk", "price": 50},
+    {"name": "Biscuits", "price": 40},
+    {"name": "Sugar", "price": 50},
     {"name": "Cooking Oil", "price": 200},
     {"name": "Tea Pack", "price": 150},
     {"name": "Soap", "price": 30},
     {"name": "Toothpaste", "price": 80},
 ]
 
-HTML_TEMPLATE = """
+# 🧠 Groq LLM setup
+chat_model = None
+conversation = None
+
+# 🧩 HTML Interface
+HTML_TEMPLATE = """ 
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Kirana Store + AI</title>
+    <title>Kirana Store + AI (LangChain)</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 30px; background: #f7f7f7; }
         h1 { color: #333; }
@@ -39,7 +53,7 @@ HTML_TEMPLATE = """
     </style>
 </head>
 <body>
-<h1>🛒 Kirana Store + 💬 AI Assistant</h1>
+<h1>🛒 Kirana Store + 💬 AI Assistant (LangChain + Groq)</h1>
 
 {% if not api_key %}
 <form id="keyForm">
@@ -148,68 +162,96 @@ document.getElementById('keyForm').addEventListener('submit', async (e) => {
 </html>
 """
 
-client = None
-chat_history = []  # in-memory for AJAX demo
+# 🧠 Initialize Groq model with LangChain
+def init_groq(key):
+    """Initialize Groq model with LangChain ConversationChain."""
+    global chat_model, conversation
+    chat_model = ChatGroq(
+        api_key=key,
+        model_name="llama-3.3-70b-versatile"
+    )
 
+    template = """You are a smart Kirana store assistant.
+Below is the conversation history and the latest user question.
+Use the history to maintain context.
+
+Conversation History:
+{history}
+
+User Query:
+{input}
+
+If order details are given, calculate total and provide summary.
+Inventory reference:
+Rice ₹60/kg, Milk ₹50/ltr, Biscuits ₹40, Sugar ₹50 (500g),
+Cooking Oil ₹200, Tea Pack ₹150, Soap ₹30, Toothpaste ₹80.
+"""
+
+    prompt = PromptTemplate(
+        input_variables=["history", "input"],
+        template=template
+    )
+
+    memory = ConversationBufferMemory(
+        memory_key="history",
+        input_key="input",
+        return_messages=False
+    )
+
+    conversation = ConversationChain(
+        llm=chat_model,
+        memory=memory,
+        prompt=prompt,
+        verbose=False
+    )
+
+# 🏠 Home page
 @app.route("/", methods=["GET"])
 def home():
     api_key = session.get("api_key")
     return render_template_string(HTML_TEMPLATE, api_key=bool(api_key), inventory=INVENTORY)
 
+# 🔑 Set API key
 @app.route("/set_key_ajax", methods=["POST"])
 def set_key_ajax():
-    global client
     data = request.get_json()
-    api_key = data.get("api_key","").strip()
+    api_key = data.get("api_key", "").strip()
     try:
-        test_client = Groq(api_key=api_key)
-        test_client.models.list()  # simple validation
+        init_groq(api_key)
         session["api_key"] = api_key
-        client = test_client
         return jsonify({"success": True})
     except Exception as e:
-        return jsonify({"success": False, "error": f"Invalid API Key: {str(e)}"})
+        return jsonify({"success": False, "error": str(e)})
 
+# 💬 AJAX chat endpoint
 @app.route("/ajax_chat", methods=["POST"])
 def ajax_chat():
-    global client, chat_history
-    if not client:
+    global conversation
+    if not conversation:
         api_key = session.get("api_key")
         if not api_key:
-            return jsonify({"response": "API key not set!"})
-        client = Groq(api_key=api_key)
+            return jsonify({"response": "❌ API key not set"})
+        init_groq(api_key)
 
     data = request.get_json()
-    question = data.get("question","").strip()
+    question = data.get("question", "").strip()
     if not question:
-        return jsonify({"response": "Please provide a valid request!"})
+        return jsonify({"response": "⚠️ Please provide a valid request!"})
 
     try:
-        completion = client.chat.completions.create(
-            messages=[
-                {"role": "system", "content": "You are a Kirana store assistant. Include inventory and total cost info if provided."},
-                {"role": "user", "content": question}
-            ],
-            model="llama-3.3-70b-versatile"
-        )
-        response_text = completion.choices[0].message.content
+        result = conversation.run(input=question)
+        return jsonify({"response": result})
     except Exception as e:
-        response_text = f"⚠️ Error calling Groq API: {str(e)}"
+        return jsonify({"response": f"⚠️ Groq Error: {str(e)}"})
 
-    chat_history.append((question, response_text))
-    return jsonify({"response": response_text})
-
+# 🧹 Clear chat memory
 @app.route("/clear_history", methods=["POST"])
 def clear_history():
-    global chat_history
-    chat_history = []
+    api_key = session.get("api_key")
+    if api_key:
+        init_groq(api_key)
     return jsonify({"success": True})
 
+# 🚀 Run app
 if __name__ == "__main__":
     app.run(debug=True)
-
-
-
-
-
-
